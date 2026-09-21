@@ -43,7 +43,6 @@ public class PresenteController {
     @CrossOrigin(origins = "*", allowedHeaders = "*")
     @PostMapping("/processar-pagamento")
     public ResponseEntity<?> processarPagamento(@RequestBody Map<String, Object> brickData) {
-        // ... restante do método igual
         try {
             Long presenteId = Long.parseLong(brickData.get("presenteId").toString());
             Presente presente = repository.findById(presenteId)
@@ -53,31 +52,59 @@ public class PresenteController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Este presente já foi adquirido!"));
             }
 
-            // Captura o nome do convidado se enviado
+            // Registar nome do convidado
+            String nomeConvidado = "Convidado";
             if (brickData.containsKey("compradorNome") && brickData.get("compradorNome") != null) {
-                presente.setCompradorNome(brickData.get("compradorNome").toString().trim());
+                String nomeInformado = brickData.get("compradorNome").toString().trim();
+                if (!nomeInformado.isBlank()) {
+                    nomeConvidado = nomeInformado;
+                    presente.setCompradorNome(nomeConvidado);
+                }
             }
 
-            BigDecimal transactionAmount = new BigDecimal(brickData.get("transaction_amount").toString())
-                    .setScale(2, java.math.RoundingMode.HALF_UP);
-            String paymentMethodId = (String) brickData.get("payment_method_id");
+            // Dividir em primeiro e último nome
+            String[] partesNome = nomeConvidado.split(" ", 2);
+            String firstName = partesNome[0];
+            String lastName = partesNome.length > 1 ? partesNome[1] : "Convidado";
 
-            // Dados do pagador
+            // Valor do presente com duas casas decimais
+            BigDecimal transactionAmount = presente.getValor().setScale(2, java.math.RoundingMode.HALF_UP);
+            String paymentMethodId = brickData.get("payment_method_id") != null
+                    ? brickData.get("payment_method_id").toString()
+                    : "pix";
+
+            // Tratar dados do pagador
             Map<String, Object> payerMap = (Map<String, Object>) brickData.get("payer");
-            String email = payerMap != null && payerMap.containsKey("email") ? (String) payerMap.get("email") : "convidado@casamento.com";
+            String email = (payerMap != null && payerMap.get("email") != null && !payerMap.get("email").toString().isBlank())
+                    ? payerMap.get("email").toString()
+                    : "convidado_" + presente.getId() + "@casamento.com";
+
+            if (payerMap != null && payerMap.get("first_name") != null && !payerMap.get("first_name").toString().isBlank()) {
+                firstName = payerMap.get("first_name").toString();
+            }
+            if (payerMap != null && payerMap.get("last_name") != null && !payerMap.get("last_name").toString().isBlank()) {
+                lastName = payerMap.get("last_name").toString();
+            }
 
             PaymentPayerRequest.PaymentPayerRequestBuilder payerBuilder = PaymentPayerRequest.builder()
-                    .email(email);
+                    .email(email)
+                    .firstName(firstName)
+                    .lastName(lastName);
 
+            // Documento de identificação (CPF)
             if (payerMap != null && payerMap.containsKey("identification")) {
                 Map<String, Object> identMap = (Map<String, Object>) payerMap.get("identification");
-                if (identMap != null && identMap.get("type") != null && identMap.get("number") != null) {
-                    payerBuilder.identification(
-                            com.mercadopago.client.common.IdentificationRequest.builder()
-                                    .type((String) identMap.get("type"))
-                                    .number((String) identMap.get("number"))
-                                    .build()
-                    );
+                if (identMap != null && identMap.get("number") != null) {
+                    String docNumber = identMap.get("number").toString().replaceAll("\\D", "");
+                    String docType = identMap.get("type") != null ? identMap.get("type").toString() : "CPF";
+                    if (!docNumber.isBlank()) {
+                        payerBuilder.identification(
+                                IdentificationRequest.builder()
+                                        .type(docType)
+                                        .number(docNumber)
+                                        .build()
+                        );
+                    }
                 }
             }
 
@@ -90,25 +117,23 @@ public class PresenteController {
 
             // Se for Cartão de Crédito
             if (brickData.containsKey("token") && brickData.get("token") != null) {
-                paymentBuilder.token((String) brickData.get("token"));
+                paymentBuilder.token(brickData.get("token").toString());
                 if (brickData.containsKey("installments") && brickData.get("installments") != null) {
                     paymentBuilder.installments(Integer.parseInt(brickData.get("installments").toString()));
                 }
                 if (brickData.containsKey("issuer_id") && brickData.get("issuer_id") != null) {
-                    paymentBuilder.issuerId((String) brickData.get("issuer_id"));
+                    paymentBuilder.issuerId(brickData.get("issuer_id").toString());
                 }
             }
 
             PaymentClient client = new PaymentClient();
             Payment payment = client.create(paymentBuilder.build());
 
-            // Se aprovado na hora (ex: Cartão de crédito aprovado)
             if ("approved".equals(payment.getStatus())) {
                 presente.setStatus(StatusPresente.COMPRADO);
                 presente.setPaymentId(String.valueOf(payment.getId()));
                 repository.save(presente);
             } else {
-                // Salva o nome e aguarda o webhook para Pix/Boleto
                 repository.save(presente);
             }
 
@@ -117,14 +142,12 @@ public class PresenteController {
             response.put("status", payment.getStatus());
             response.put("status_detail", payment.getStatusDetail());
 
-            // Se for Pix, envia o QR Code e a chave Copia e Cola para o frontend exibir
             if (payment.getPointOfInteraction() != null &&
                     payment.getPointOfInteraction().getTransactionData() != null) {
                 response.put("qr_code", payment.getPointOfInteraction().getTransactionData().getQrCode());
                 response.put("qr_code_base64", payment.getPointOfInteraction().getTransactionData().getQrCodeBase64());
             }
 
-            // Se for Boleto, envia o link do boleto
             if (payment.getTransactionDetails() != null && payment.getTransactionDetails().getExternalResourceUrl() != null) {
                 response.put("ticket_url", payment.getTransactionDetails().getExternalResourceUrl());
             }
@@ -132,12 +155,12 @@ public class PresenteController {
             return ResponseEntity.ok(response);
 
         } catch (com.mercadopago.exceptions.MPApiException apiException) {
-            System.err.println(">>> ERRO MERCADO PAGO BRICKS: " + apiException.getApiResponse().getContent());
-            return ResponseEntity.badRequest().body(Map.of("error", apiException.getApiResponse().getContent()));
+            String detalhesErro = apiException.getApiResponse() != null ? apiException.getApiResponse().getContent() : apiException.getMessage();
+            System.err.println(">>> ERRO DETALHADO DO MERCADO PAGO: " + detalhesErro);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", detalhesErro));
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro desconhecido"));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro desconhecido"));
         }
     }
 
