@@ -4,21 +4,25 @@ import com.casamento.casamento_api.model.Presente;
 import com.casamento.casamento_api.model.StatusPresente;
 import com.casamento.casamento_api.repository.PresenteRepository;
 import com.mercadopago.MercadoPagoConfig;
-import com.mercadopago.client.payment.PaymentClient;
-import com.mercadopago.client.preference.*;
+import com.mercadopago.client.payment.*;
 import com.mercadopago.resources.payment.Payment;
-import com.mercadopago.resources.preference.Preference;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/presentes")
-@CrossOrigin(origins = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS})
+@CrossOrigin(
+        origins = "*",
+        allowedHeaders = "*",
+        methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS}
+)
 public class PresenteController {
 
     private final PresenteRepository repository;
@@ -29,63 +33,111 @@ public class PresenteController {
         MercadoPagoConfig.setAccessToken(mpToken);
     }
 
-    // 1. Endpoint que o site consulta para listar apenas os presentes DISPONÍVEIS
+    // 1. Listar apenas os presentes DISPONÍVEIS
     @GetMapping
     public List<Presente> listarDisponiveis() {
         return repository.findByStatus(StatusPresente.DISPONIVEL);
     }
 
-    // 2. Endpoint chamado quando o convidado clica em "Presentear"
-    @PostMapping("/{id}/checkout")
-    public ResponseEntity<Map<String, String>> criarCheckout(
-            @PathVariable Long id,
-            @RequestBody(required = false) Map<String, String> body) {
-
-        Presente presente = repository.findById(id).orElseThrow();
-
-        if (presente.getStatus() == StatusPresente.COMPRADO) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Este presente já foi adquirido!"));
-        }
-
+    // 2. Processar Pagamento vindo do Checkout Bricks (Pix, Cartão, Boleto)
+    @CrossOrigin(origins = "*", allowedHeaders = "*")
+    @PostMapping("/processar-pagamento")
+    public ResponseEntity<?> processarPagamento(@RequestBody Map<String, Object> brickData) {
+        // ... restante do método igual
         try {
-            // Guarda temporariamente o nome de quem está a oferecer, caso enviado
-            if (body != null && body.containsKey("nome") && !body.get("nome").isBlank()) {
-                presente.setCompradorNome(body.get("nome").trim());
+            Long presenteId = Long.parseLong(brickData.get("presenteId").toString());
+            Presente presente = repository.findById(presenteId)
+                    .orElseThrow(() -> new RuntimeException("Presente não encontrado"));
+
+            if (presente.getStatus() == StatusPresente.COMPRADO) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Este presente já foi adquirido!"));
+            }
+
+            // Captura o nome do convidado se enviado
+            if (brickData.containsKey("compradorNome") && brickData.get("compradorNome") != null) {
+                presente.setCompradorNome(brickData.get("compradorNome").toString().trim());
+            }
+
+            BigDecimal transactionAmount = new BigDecimal(brickData.get("transaction_amount").toString())
+                    .setScale(2, java.math.RoundingMode.HALF_UP);
+            String paymentMethodId = (String) brickData.get("payment_method_id");
+
+            // Dados do pagador
+            Map<String, Object> payerMap = (Map<String, Object>) brickData.get("payer");
+            String email = payerMap != null && payerMap.containsKey("email") ? (String) payerMap.get("email") : "convidado@casamento.com";
+
+            PaymentPayerRequest.PaymentPayerRequestBuilder payerBuilder = PaymentPayerRequest.builder()
+                    .email(email);
+
+            if (payerMap != null && payerMap.containsKey("identification")) {
+                Map<String, Object> identMap = (Map<String, Object>) payerMap.get("identification");
+                if (identMap != null && identMap.get("type") != null && identMap.get("number") != null) {
+                    payerBuilder.identification(
+                            com.mercadopago.client.common.IdentificationRequest.builder()
+                                    .type((String) identMap.get("type"))
+                                    .number((String) identMap.get("number"))
+                                    .build()
+                    );
+                }
+            }
+
+            PaymentCreateRequest.PaymentCreateRequestBuilder paymentBuilder = PaymentCreateRequest.builder()
+                    .transactionAmount(transactionAmount)
+                    .description("Presente: " + presente.getNome())
+                    .paymentMethodId(paymentMethodId)
+                    .payer(payerBuilder.build())
+                    .externalReference(String.valueOf(presente.getId()));
+
+            // Se for Cartão de Crédito
+            if (brickData.containsKey("token") && brickData.get("token") != null) {
+                paymentBuilder.token((String) brickData.get("token"));
+                if (brickData.containsKey("installments") && brickData.get("installments") != null) {
+                    paymentBuilder.installments(Integer.parseInt(brickData.get("installments").toString()));
+                }
+                if (brickData.containsKey("issuer_id") && brickData.get("issuer_id") != null) {
+                    paymentBuilder.issuerId((String) brickData.get("issuer_id"));
+                }
+            }
+
+            PaymentClient client = new PaymentClient();
+            Payment payment = client.create(paymentBuilder.build());
+
+            // Se aprovado na hora (ex: Cartão de crédito aprovado)
+            if ("approved".equals(payment.getStatus())) {
+                presente.setStatus(StatusPresente.COMPRADO);
+                presente.setPaymentId(String.valueOf(payment.getId()));
+                repository.save(presente);
+            } else {
+                // Salva o nome e aguarda o webhook para Pix/Boleto
                 repository.save(presente);
             }
 
-            // Garante que o valor tenha 2 casas decimais
-            BigDecimal valorUnitario = presente.getValor().setScale(2, java.math.RoundingMode.HALF_UP);
+            Map<String, Object> response = new HashMap<>();
+            response.put("id", payment.getId());
+            response.put("status", payment.getStatus());
+            response.put("status_detail", payment.getStatusDetail());
 
-            PreferenceItemRequest itemRequest = PreferenceItemRequest.builder()
-                    .id(String.valueOf(presente.getId()))
-                    .title(presente.getNome())
-                    .description(presente.getDescricao() != null ? presente.getDescricao() : "Presente de Casamento")
-                    .quantity(1)
-                    .unitPrice(valorUnitario)
-                    .currencyId("BRL")
-                    .build();
+            // Se for Pix, envia o QR Code e a chave Copia e Cola para o frontend exibir
+            if (payment.getPointOfInteraction() != null &&
+                    payment.getPointOfInteraction().getTransactionData() != null) {
+                response.put("qr_code", payment.getPointOfInteraction().getTransactionData().getQrCode());
+                response.put("qr_code_base64", payment.getPointOfInteraction().getTransactionData().getQrCodeBase64());
+            }
 
-            PreferenceRequest preferenceRequest = PreferenceRequest.builder()
-                    .items(List.of(itemRequest))
-                    .externalReference(String.valueOf(presente.getId()))
-                    .build();
+            // Se for Boleto, envia o link do boleto
+            if (payment.getTransactionDetails() != null && payment.getTransactionDetails().getExternalResourceUrl() != null) {
+                response.put("ticket_url", payment.getTransactionDetails().getExternalResourceUrl());
+            }
 
-            PreferenceClient client = new PreferenceClient();
-            Preference preference = client.create(preferenceRequest);
+            return ResponseEntity.ok(response);
 
-            // Devolve tanto initPoint como init_point para evitar erros de leitura no frontend
-            return ResponseEntity.ok(Map.of(
-                    "initPoint", preference.getInitPoint(),
-                    "init_point", preference.getInitPoint()
-            ));
         } catch (com.mercadopago.exceptions.MPApiException apiException) {
-            System.err.println(">>> ERRO DETALHADO DO MERCADO PAGO: " + apiException.getApiResponse().getContent());
-            apiException.printStackTrace();
+            System.err.println(">>> ERRO MERCADO PAGO BRICKS: " + apiException.getApiResponse().getContent());
             return ResponseEntity.badRequest().body(Map.of("error", apiException.getApiResponse().getContent()));
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro desconhecido"));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro desconhecido"));
         }
     }
 
@@ -104,15 +156,6 @@ public class PresenteController {
                     repository.findById(presenteId).ifPresent(p -> {
                         p.setStatus(StatusPresente.COMPRADO);
                         p.setPaymentId(dataId);
-
-                        // Se não tiver nome registado no momento do clique, recolhe os dados do pagador do Mercado Pago
-                        if (p.getCompradorNome() == null || p.getCompradorNome().isBlank()) {
-                            if (payment.getPayer() != null && payment.getPayer().getFirstName() != null) {
-                                p.setCompradorNome(payment.getPayer().getFirstName());
-                            } else {
-                                p.setCompradorNome("Convidado Anónimo");
-                            }
-                        }
                         repository.save(p);
                     });
                 }
@@ -123,13 +166,13 @@ public class PresenteController {
         }
     }
 
-    // 4. ADMIN: Listar TODOS os presentes (disponíveis e comprados)
+    // 4. ADMIN: Listar TODOS os presentes
     @GetMapping("/todos")
     public List<Presente> listarTodos() {
         return repository.findAll();
     }
 
-    // 5. ADMIN: Cadastrar um novo presente
+    // 5. ADMIN: Cadastrar
     @PostMapping
     public ResponseEntity<Presente> cadastrar(@RequestBody Presente novoPresente) {
         novoPresente.setStatus(StatusPresente.DISPONIVEL);
@@ -137,14 +180,14 @@ public class PresenteController {
         return ResponseEntity.ok(salvo);
     }
 
-    // 6. ADMIN: Excluir um presente
+    // 6. ADMIN: Excluir
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deletar(@PathVariable Long id) {
         repository.deleteById(id);
         return ResponseEntity.noContent().build();
     }
 
-    // 7. ADMIN: Atualizar/Editar um presente existente
+    // 7. ADMIN: Editar
     @PutMapping("/{id}")
     public ResponseEntity<Presente> atualizar(@PathVariable Long id, @RequestBody Presente dadosAtualizados) {
         return repository.findById(id).map(presente -> {
@@ -155,7 +198,6 @@ public class PresenteController {
             if (dadosAtualizados.getImagemUrl() != null && !dadosAtualizados.getImagemUrl().isEmpty()) {
                 presente.setImagemUrl(dadosAtualizados.getImagemUrl());
             }
-
             if (dadosAtualizados.getStatus() != null) {
                 presente.setStatus(dadosAtualizados.getStatus());
             }
