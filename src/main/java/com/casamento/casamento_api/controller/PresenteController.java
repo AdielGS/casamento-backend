@@ -20,7 +20,6 @@ import java.util.Map;
 @RequestMapping("/api/presentes")
 @CrossOrigin(origins = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS})
 public class PresenteController {
-    // ... restante do código
 
     private final PresenteRepository repository;
 
@@ -30,16 +29,18 @@ public class PresenteController {
         MercadoPagoConfig.setAccessToken(mpToken);
     }
 
-    // 1. Endpoint que o site vai consultar para listar apenas os presentes DISPONÍVEIS
+    // 1. Endpoint que o site consulta para listar apenas os presentes DISPONÍVEIS
     @GetMapping
     public List<Presente> listarDisponiveis() {
         return repository.findByStatus(StatusPresente.DISPONIVEL);
     }
 
     // 2. Endpoint chamado quando o convidado clica em "Presentear"
-    // 2. Endpoint chamado quando o convidado clica em "Presentear"
     @PostMapping("/{id}/checkout")
-    public ResponseEntity<Map<String, String>> criarCheckout(@PathVariable Long id) {
+    public ResponseEntity<Map<String, String>> criarCheckout(
+            @PathVariable Long id,
+            @RequestBody(required = false) Map<String, String> body) {
+
         Presente presente = repository.findById(id).orElseThrow();
 
         if (presente.getStatus() == StatusPresente.COMPRADO) {
@@ -47,6 +48,12 @@ public class PresenteController {
         }
 
         try {
+            // Guarda temporariamente o nome de quem está a oferecer, caso enviado
+            if (body != null && body.containsKey("nome") && !body.get("nome").isBlank()) {
+                presente.setCompradorNome(body.get("nome").trim());
+                repository.save(presente);
+            }
+
             // Garante que o valor tenha 2 casas decimais
             BigDecimal valorUnitario = presente.getValor().setScale(2, java.math.RoundingMode.HALF_UP);
 
@@ -67,7 +74,11 @@ public class PresenteController {
             PreferenceClient client = new PreferenceClient();
             Preference preference = client.create(preferenceRequest);
 
-            return ResponseEntity.ok(Map.of("initPoint", preference.getInitPoint()));
+            // Devolve tanto initPoint como init_point para evitar erros de leitura no frontend
+            return ResponseEntity.ok(Map.of(
+                    "initPoint", preference.getInitPoint(),
+                    "init_point", preference.getInitPoint()
+            ));
         } catch (com.mercadopago.exceptions.MPApiException apiException) {
             System.err.println(">>> ERRO DETALHADO DO MERCADO PAGO: " + apiException.getApiResponse().getContent());
             apiException.printStackTrace();
@@ -93,10 +104,14 @@ public class PresenteController {
                     repository.findById(presenteId).ifPresent(p -> {
                         p.setStatus(StatusPresente.COMPRADO);
                         p.setPaymentId(dataId);
-                        if (payment.getPayer() != null && payment.getPayer().getFirstName() != null) {
-                            p.setCompradorNome(payment.getPayer().getFirstName());
-                        } else {
-                            p.setCompradorNome("Convidado Anônimo");
+
+                        // Se não tiver nome registado no momento do clique, recolhe os dados do pagador do Mercado Pago
+                        if (p.getCompradorNome() == null || p.getCompradorNome().isBlank()) {
+                            if (payment.getPayer() != null && payment.getPayer().getFirstName() != null) {
+                                p.setCompradorNome(payment.getPayer().getFirstName());
+                            } else {
+                                p.setCompradorNome("Convidado Anónimo");
+                            }
                         }
                         repository.save(p);
                     });
@@ -107,6 +122,7 @@ public class PresenteController {
             return ResponseEntity.badRequest().build();
         }
     }
+
     // 4. ADMIN: Listar TODOS os presentes (disponíveis e comprados)
     @GetMapping("/todos")
     public List<Presente> listarTodos() {
@@ -136,12 +152,10 @@ public class PresenteController {
             presente.setValor(dadosAtualizados.getValor());
             presente.setDescricao(dadosAtualizados.getDescricao());
 
-            // Só atualiza a foto se uma nova imagem tiver sido enviada
             if (dadosAtualizados.getImagemUrl() != null && !dadosAtualizados.getImagemUrl().isEmpty()) {
                 presente.setImagemUrl(dadosAtualizados.getImagemUrl());
             }
 
-            // Permite alterar o status pelo Admin (ex: reativar um presente)
             if (dadosAtualizados.getStatus() != null) {
                 presente.setStatus(dadosAtualizados.getStatus());
             }
