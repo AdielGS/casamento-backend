@@ -157,25 +157,55 @@ public class PresenteController {
     }
 
     @PostMapping("/webhook")
-    public ResponseEntity<Void> processarWebhook(@RequestParam(value = "type", required = false) String type,
-                                                 @RequestParam(value = "data.id", required = false) String dataId) {
+    public ResponseEntity<Void> processarWebhook(
+            @RequestParam(value = "type", required = false) String type,
+            @RequestParam(value = "topic", required = false) String topic,
+            @RequestParam(value = "data.id", required = false) String dataIdParam,
+            @RequestParam(value = "id", required = false) String idParam,
+            @RequestBody(required = false) Map<String, Object> payload) {
         try {
-            if ("payment".equals(type) && dataId != null) {
+            String paymentId = null;
+
+            // 1. Tenta pegar o ID vindo pelos parâmetros da URL
+            if (dataIdParam != null && !dataIdParam.isBlank()) {
+                paymentId = dataIdParam;
+            } else if (idParam != null && !idParam.isBlank()) {
+                paymentId = idParam;
+            }
+
+            // 2. Se não veio na URL, tenta pegar do corpo JSON (payload)
+            if (paymentId == null && payload != null) {
+                if (payload.containsKey("data") && payload.get("data") instanceof Map) {
+                    Map<String, Object> dataMap = (Map<String, Object>) payload.get("data");
+                    if (dataMap.containsKey("id")) {
+                        paymentId = dataMap.get("id").toString();
+                    }
+                } else if (payload.containsKey("id")) {
+                    paymentId = payload.get("id").toString();
+                }
+            }
+
+            // Se identificou um ID de pagamento, consulta o Mercado Pago
+            if (paymentId != null) {
                 PaymentClient paymentClient = new PaymentClient();
-                Payment payment = paymentClient.get(Long.parseLong(dataId));
+                Payment payment = paymentClient.get(Long.parseLong(paymentId));
 
                 if ("approved".equals(payment.getStatus())) {
-                    Long presenteId = Long.parseLong(payment.getExternalReference());
-                    repository.findById(presenteId).ifPresent(p -> {
-                        p.setStatus(StatusPresente.COMPRADO);
-                        p.setPaymentId(dataId);
-                        repository.save(p);
-                    });
+                    if (payment.getExternalReference() != null) {
+                        Long presenteId = Long.parseLong(payment.getExternalReference());
+                        repository.findById(presenteId).ifPresent(p -> {
+                            p.setStatus(StatusPresente.COMPRADO);
+                            p.setPaymentId(String.valueOf(payment.getId()));
+                            repository.save(p);
+                            System.out.println(">>> PRESENTE " + presenteId + " ATUALIZADO PARA COMPRADO VIA WEBHOOK!");
+                        });
+                    }
                 }
             }
             return ResponseEntity.ok().build();
         } catch (Exception e) {
-            return ResponseEntity.badRequest().build();
+            System.err.println("Erro no webhook: " + e.getMessage());
+            return ResponseEntity.ok().build(); // Retorna 200 para o Mercado Pago não reenviar em loop
         }
     }
 
