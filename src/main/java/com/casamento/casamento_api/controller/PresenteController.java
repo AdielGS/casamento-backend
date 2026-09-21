@@ -4,6 +4,7 @@ import com.casamento.casamento_api.model.Presente;
 import com.casamento.casamento_api.model.StatusPresente;
 import com.casamento.casamento_api.repository.PresenteRepository;
 import com.mercadopago.MercadoPagoConfig;
+import com.mercadopago.client.common.IdentificationRequest;
 import com.mercadopago.client.payment.*;
 import com.mercadopago.resources.payment.Payment;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,11 +19,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/presentes")
-@CrossOrigin(
-        origins = "*",
-        allowedHeaders = "*",
-        methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS}
-)
+@CrossOrigin(origins = "*", allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS})
 public class PresenteController {
 
     private final PresenteRepository repository;
@@ -33,13 +30,11 @@ public class PresenteController {
         MercadoPagoConfig.setAccessToken(mpToken);
     }
 
-    // 1. Listar apenas os presentes DISPONÍVEIS
     @GetMapping
     public List<Presente> listarDisponiveis() {
         return repository.findByStatus(StatusPresente.DISPONIVEL);
     }
 
-    // 2. Processar Pagamento vindo do Checkout Bricks (Pix, Cartão, Boleto)
     @CrossOrigin(origins = "*", allowedHeaders = "*")
     @PostMapping("/processar-pagamento")
     public ResponseEntity<?> processarPagamento(@RequestBody Map<String, Object> brickData) {
@@ -62,18 +57,15 @@ public class PresenteController {
                 }
             }
 
-            // Dividir em primeiro e último nome
             String[] partesNome = nomeConvidado.split(" ", 2);
             String firstName = partesNome[0];
             String lastName = partesNome.length > 1 ? partesNome[1] : "Convidado";
 
-            // Valor do presente com duas casas decimais
             BigDecimal transactionAmount = presente.getValor().setScale(2, java.math.RoundingMode.HALF_UP);
             String paymentMethodId = brickData.get("payment_method_id") != null
                     ? brickData.get("payment_method_id").toString()
                     : "pix";
 
-            // Tratar dados do pagador
             Map<String, Object> payerMap = (Map<String, Object>) brickData.get("payer");
             String email = (payerMap != null && payerMap.get("email") != null && !payerMap.get("email").toString().isBlank())
                     ? payerMap.get("email").toString()
@@ -91,7 +83,7 @@ public class PresenteController {
                     .firstName(firstName)
                     .lastName(lastName);
 
-            // Documento de identificação (CPF)
+            // Monta identificação caso exista (CPF)
             if (payerMap != null && payerMap.containsKey("identification")) {
                 Map<String, Object> identMap = (Map<String, Object>) payerMap.get("identification");
                 if (identMap != null && identMap.get("number") != null) {
@@ -164,11 +156,9 @@ public class PresenteController {
         }
     }
 
-    // 3. Webhook: O Mercado Pago avisa automaticamente quando o Pix/Cartão é aprovado
     @PostMapping("/webhook")
     public ResponseEntity<Void> processarWebhook(@RequestParam(value = "type", required = false) String type,
-                                                 @RequestParam(value = "data.id", required = false) String dataId,
-                                                 @RequestBody(required = false) Map<String, Object> payload) {
+                                                 @RequestParam(value = "data.id", required = false) String dataId) {
         try {
             if ("payment".equals(type) && dataId != null) {
                 PaymentClient paymentClient = new PaymentClient();
@@ -189,44 +179,36 @@ public class PresenteController {
         }
     }
 
-    // 4. ADMIN: Listar TODOS os presentes
     @GetMapping("/todos")
     public List<Presente> listarTodos() {
         return repository.findAll();
     }
 
-    // 5. ADMIN: Cadastrar
     @PostMapping
     public ResponseEntity<Presente> cadastrar(@RequestBody Presente novoPresente) {
         novoPresente.setStatus(StatusPresente.DISPONIVEL);
-        Presente salvo = repository.save(novoPresente);
-        return ResponseEntity.ok(salvo);
+        return ResponseEntity.ok(repository.save(novoPresente));
     }
 
-    // 6. ADMIN: Excluir
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deletar(@PathVariable Long id) {
         repository.deleteById(id);
         return ResponseEntity.noContent().build();
     }
 
-    // 7. ADMIN: Editar
     @PutMapping("/{id}")
     public ResponseEntity<Presente> atualizar(@PathVariable Long id, @RequestBody Presente dadosAtualizados) {
         return repository.findById(id).map(presente -> {
             presente.setNome(dadosAtualizados.getNome());
             presente.setValor(dadosAtualizados.getValor());
             presente.setDescricao(dadosAtualizados.getDescricao());
-
             if (dadosAtualizados.getImagemUrl() != null && !dadosAtualizados.getImagemUrl().isEmpty()) {
                 presente.setImagemUrl(dadosAtualizados.getImagemUrl());
             }
             if (dadosAtualizados.getStatus() != null) {
                 presente.setStatus(dadosAtualizados.getStatus());
             }
-
-            Presente atualizado = repository.save(presente);
-            return ResponseEntity.ok(atualizado);
+            return ResponseEntity.ok(repository.save(presente));
         }).orElse(ResponseEntity.notFound().build());
     }
 }
