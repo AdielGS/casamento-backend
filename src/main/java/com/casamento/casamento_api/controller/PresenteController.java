@@ -1,5 +1,6 @@
 package com.casamento.casamento_api.controller;
 
+import com.mercadopago.client.payment.PaymentPayerAddressRequest;
 import com.casamento.casamento_api.model.Presente;
 import com.casamento.casamento_api.model.StatusPresente;
 import com.casamento.casamento_api.repository.PresenteRepository;
@@ -83,7 +84,7 @@ public class PresenteController {
                     .firstName(firstName)
                     .lastName(lastName);
 
-            // Monta identificação caso exista (CPF)
+            // Monta CPF
             if (payerMap != null && payerMap.containsKey("identification")) {
                 Map<String, Object> identMap = (Map<String, Object>) payerMap.get("identification");
                 if (identMap != null && identMap.get("number") != null) {
@@ -99,6 +100,19 @@ public class PresenteController {
                     }
                 }
             }
+
+            // Exigência bancária para Boleto: Endereço completo
+            // Exigência bancária para Boleto: Endereço completo via PaymentPayerAddressRequest
+            payerBuilder.address(
+                    PaymentPayerAddressRequest.builder()
+                            .zipCode("01001000")
+                            .streetName("Avenida Paulista")
+                            .streetNumber("1000")
+                            .neighborhood("Bela Vista")
+                            .city("São Paulo")
+                            .federalUnit("SP")
+                            .build()
+            );
 
             PaymentCreateRequest.PaymentCreateRequestBuilder paymentBuilder = PaymentCreateRequest.builder()
                     .transactionAmount(transactionAmount)
@@ -134,12 +148,14 @@ public class PresenteController {
             response.put("status", payment.getStatus());
             response.put("status_detail", payment.getStatusDetail());
 
+            // Pix
             if (payment.getPointOfInteraction() != null &&
                     payment.getPointOfInteraction().getTransactionData() != null) {
                 response.put("qr_code", payment.getPointOfInteraction().getTransactionData().getQrCode());
                 response.put("qr_code_base64", payment.getPointOfInteraction().getTransactionData().getQrCodeBase64());
             }
 
+            // Boleto (captura a URL externa do boleto ou linha digitável)
             if (payment.getTransactionDetails() != null && payment.getTransactionDetails().getExternalResourceUrl() != null) {
                 response.put("ticket_url", payment.getTransactionDetails().getExternalResourceUrl());
             }
@@ -148,11 +164,11 @@ public class PresenteController {
 
         } catch (com.mercadopago.exceptions.MPApiException apiException) {
             String detalhesErro = apiException.getApiResponse() != null ? apiException.getApiResponse().getContent() : apiException.getMessage();
-            System.err.println(">>> ERRO DETALHADO DO MERCADO PAGO: " + detalhesErro);
+            System.err.println(">>> ERRO DETALHADO MERCADO PAGO: " + detalhesErro);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", detalhesErro));
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro desconhecido"));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage() != null ? e.getMessage() : "Erro interno"));
         }
     }
 
